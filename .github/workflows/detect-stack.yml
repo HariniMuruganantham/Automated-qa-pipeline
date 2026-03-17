@@ -21,13 +21,13 @@ jobs:
       manifest: manifest.json
     steps:
       - name: Checkout QA pipeline repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2        # ← updated
         with:
           repository: HariniMuruganantham/Automated-qa-pipeline
           path: qa-pipeline
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0    # ← updated
         with:
           python-version: "3.12"
 
@@ -42,7 +42,7 @@ jobs:
         run: python qa-pipeline/scripts/detect_stack.py
 
       - name: Upload manifest artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2  
         with:
           name: stack-manifest
           path: manifest.json
