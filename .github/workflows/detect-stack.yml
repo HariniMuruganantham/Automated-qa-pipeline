@@ -1,4 +1,5 @@
 name: detect-stack
+
 on:
   workflow_call:
     inputs:
@@ -12,8 +13,6 @@ on:
     secrets:
       OPENAI_API_KEY:
         required: true
-      GITHUB_TOKEN:
-        required: true
 
 jobs:
   detect:
@@ -21,22 +20,26 @@ jobs:
     outputs:
       manifest: manifest.json
     steps:
-      - uses: actions/checkout@v4  # checks out the QA repo (scripts live here)
+      - name: Checkout QA pipeline repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - run: pip install requests openai jsonschema
+      - name: Install dependencies
+        run: pip install requests openai jsonschema
 
-      - name: Collect signals and detect stack
+      - name: Run stack detection
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN:   ${{ secrets.GITHUB_TOKEN }}
           TARGET_REPO:    ${{ inputs.target_repo }}
         run: python scripts/detect_stack.py
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
         with:
           name: stack-manifest
           path: manifest.json
