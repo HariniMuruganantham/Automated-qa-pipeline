@@ -22,6 +22,9 @@ jobs:
     steps:
       - name: Checkout QA pipeline repo
         uses: actions/checkout@v4
+        with:
+          repository: HariniMuruganantham/Automated-qa-pipeline
+          path: qa-pipeline
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,7 +39,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN:   ${{ secrets.GITHUB_TOKEN }}
           TARGET_REPO:    ${{ inputs.target_repo }}
-        run: python scripts/detect_stack.py
+        run: python qa-pipeline/scripts/detect_stack.py
 
       - name: Upload manifest artifact
         uses: actions/upload-artifact@v4
