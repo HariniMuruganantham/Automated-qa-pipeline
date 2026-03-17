@@ -1,0 +1,42 @@
+name: detect-stack
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        required: true
+        type: string
+    outputs:
+      manifest:
+        description: "Path to manifest.json artifact"
+        value: ${{ jobs.detect.outputs.manifest }}
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+      GITHUB_TOKEN:
+        required: true
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      manifest: manifest.json
+    steps:
+      - uses: actions/checkout@v4  # checks out the QA repo (scripts live here)
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests openai jsonschema
+
+      - name: Collect signals and detect stack
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN:   ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REPO:    ${{ inputs.target_repo }}
+        run: python scripts/detect_stack.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stack-manifest
+          path: manifest.json
