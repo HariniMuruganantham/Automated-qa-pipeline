@@ -6,6 +6,10 @@ on:
       target_repo:
         required: true
         type: string
+    outputs:
+      manifest:
+        description: "Path to manifest.json artifact"
+        value: ${{ jobs.detect.outputs.manifest }}
     secrets:
       OPENAI_API_KEY:
         required: true
@@ -13,24 +17,34 @@ on:
 jobs:
   detect:
     runs-on: ubuntu-latest
-
+    outputs:
+      manifest: manifest.json
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout QA pipeline repo
+        uses: actions/checkout@v4.2.2
+        with:
+          repository: HariniMuruganantham/Automated-qa-pipeline
+          path: qa-pipeline
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
         with:
           python-version: "3.12"
 
-      - run: pip install requests openai jsonschema
+      - name: Install dependencies
+        run: pip install requests openai jsonschema
 
-      - name: Run detection
+      - name: Run stack detection
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN:   ${{ secrets.GITHUB_TOKEN }}
           TARGET_REPO:    ${{ inputs.target_repo }}
-        run: python detect_stack.py
+        run: python qa-pipeline/scripts/detect_stack.py
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4.6.2
         with:
-          name: manifest
-          path: manifest.json
+          name: stack-manifest
+          path: |
+            manifest.json
+            manifest_debug.json
