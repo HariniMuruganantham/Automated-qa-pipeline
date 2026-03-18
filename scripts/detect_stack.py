@@ -313,8 +313,11 @@ Rules:
 - skip_e2e and skip_visual: true ONLY if has_frontend is false
 - skip_performance: true if no public deployment URL detected (local apps, Streamlit without hosting, etc.)
 - confidence: 0.0-1.0 float — your honest assessment of how accurate the manifest is
-- confidence_notes: brief string explaining what you're certain about vs unsure of"""
-
+- confidence_notes: brief string explaining what you're certain about vs unsure of
+- Python projects: if no test runner is specified, default test_runner to "pytest"
+- frontend_dir: always set when has_frontend is true — use the actual directory name from the analysis
+- backend_framework: if the app uses LangChain/LlamaIndex/an AI orchestration layer, that is the backend_framework — the UI framework (Streamlit/Gradio) goes in framework and frontend_framework only
+- load tests: only include if there is a running HTTP server or external API endpoint — FAISS, SQLite, local vector stores do not qualify"""
 
 def build_pass2_prompt(signals, pass1_analysis):
     return f"""Convert the following technical analysis into a structured JSON manifest.
