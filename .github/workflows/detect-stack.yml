@@ -6,6 +6,10 @@ on:
       target_repo:
         required: true
         type: string
+      qa_pipeline_ref:
+        required: false
+        type: string
+        default: main
       upload_debug_artifact:
         required: false
         type: boolean
@@ -27,28 +31,32 @@ jobs:
     outputs:
       manifest: manifest.json
     steps:
-      - name: Checkout current repository
+      - name: Checkout QA pipeline repository
         uses: actions/checkout@v4.2.2
+        with:
+          repository: HariniMuruganantham/Automated-qa-pipeline
+          ref: ${{ inputs.qa_pipeline_ref }}
+          path: qa-pipeline
 
       - name: Set up Python
         uses: actions/setup-python@v5.6.0
         with:
           python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: qa-pipeline/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r qa-pipeline/requirements.txt
 
       - name: Run stack detection
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN:   ${{ secrets.GITHUB_TOKEN }}
           TARGET_REPO:    ${{ inputs.target_repo }}
-        run: python scripts/detect_stack.py
+        run: python qa-pipeline/scripts/detect_stack.py
 
       - name: Generate QA strategy and test cases
-        run: python scripts/generate_qa_strategy.py
+        run: python qa-pipeline/scripts/generate_qa_strategy.py
 
       - name: Upload manifest artifact
         uses: actions/upload-artifact@v4.6.2
