@@ -2,7 +2,10 @@ import os
 import json
 import base64
 import datetime
+import time
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from openai import OpenAI
 
 # ── env ───────────────────────────────────────────────────────────────────────
@@ -22,6 +25,9 @@ client = OpenAI(api_key=OPENAI_KEY)
 # ── constants ─────────────────────────────────────────────────────────────────
 MAX_RECURSIVE_FILES = 300   # stop recursion after this many files (avoids huge monorepos)
 MAX_FILE_CONTENT    = 3000  # max chars per file sent to GPT
+REQUEST_TIMEOUT_SEC = 20
+OPENAI_MAX_RETRIES  = 3
+OPENAI_RETRY_SLEEP  = 2
 
 DEP_FILENAMES = {
     "package.json", "requirements.txt", "pyproject.toml", "setup.py",
@@ -57,22 +63,78 @@ SKIP_DIRS = {
     "vendor", "target", "bin", "obj",
 }
 
+session = requests.Session()
+retry_cfg = Retry(
+    total=3,
+    backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"],
+)
+session.mount("https://", HTTPAdapter(max_retries=retry_cfg))
+
 
 # ── 1. GitHub helpers ─────────────────────────────────────────────────────────
 
 def gh_get(path):
-    r = requests.get(f"{GH}{path}", headers=HEADERS)
-    return r.json() if r.status_code == 200 else None
+    try:
+        r = session.get(f"{GH}{path}", headers=HEADERS, timeout=REQUEST_TIMEOUT_SEC)
+        if r.status_code == 200:
+            return r.json()
+        if r.status_code == 403 and "rate limit" in r.text.lower():
+            print("[WARN] GitHub rate limit reached while fetching:", path)
+        else:
+            print(f"[WARN] GitHub GET failed ({r.status_code}) for: {path}")
+        return None
+    except requests.RequestException as e:
+        print(f"[WARN] GitHub GET exception for {path}: {e}")
+        return None
 
 
 def get_file(path):
     data = gh_get(f"/repos/{REPO}/contents/{path}")
     if data and isinstance(data, dict) and "content" in data:
-        return base64.b64decode(data["content"]).decode(errors="ignore")
+        return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
     return None
 
 
-# ── 2. UPGRADE 1: recursive repo traversal ───────────────────────────────────
+# ── 2. repo traversal (fast tree API + fallback) ─────────────────────────────
+
+def get_default_branch():
+    repo_meta = gh_get(f"/repos/{REPO}")
+    if isinstance(repo_meta, dict):
+        return repo_meta.get("default_branch")
+    return None
+
+
+def walk_repo_via_tree_api():
+    """
+    Fast full-tree listing via Git Trees API.
+    Falls back to recursive contents API if unavailable.
+    """
+    default_branch = get_default_branch()
+    if not default_branch:
+        return None
+    tree = gh_get(f"/repos/{REPO}/git/trees/{default_branch}?recursive=1")
+    if not isinstance(tree, dict):
+        return None
+    entries = tree.get("tree", [])
+    if not isinstance(entries, list):
+        return None
+
+    files = []
+    for item in entries:
+        if item.get("type") != "blob":
+            continue
+        item_path = item.get("path", "")
+        if not item_path:
+            continue
+        parts = item_path.split("/")
+        if any(p in SKIP_DIRS for p in parts):
+            continue
+        files.append(item_path)
+        if len(files) >= MAX_RECURSIVE_FILES:
+            break
+    return sorted(files)
 
 def walk_repo(path="", _count=None):
     """
@@ -102,7 +164,7 @@ def walk_repo(path="", _count=None):
         elif item_type == "dir" and name not in SKIP_DIRS:
             all_files.extend(walk_repo(item_path, _count))
 
-    return all_files
+    return sorted(all_files)
 
 
 # ── 3. collect raw signals ────────────────────────────────────────────────────
@@ -118,8 +180,11 @@ def collect_signals():
     signals["topics"] = (topics or {}).get("names", [])
 
     # UPGRADE 1+2: full recursive file list
-    print("[collect] Walking full repo tree recursively ...")
-    all_files                = walk_repo()
+    print("[collect] Collecting file tree ...")
+    all_files = walk_repo_via_tree_api()
+    if all_files is None:
+        print("[collect] Tree API unavailable, falling back to recursive contents API ...")
+        all_files = walk_repo()
     signals["all_files"]     = all_files
     signals["total_files"]   = len(all_files)
 
@@ -177,13 +242,14 @@ def collect_signals():
     test_files = [
         f for f in all_files
         if any(seg in f for seg in ["/test/", "/tests/", "/__tests__/", "/spec/", "/e2e/"])
+        or f.startswith(("test/", "tests/", "__tests__/", "spec/", "e2e/"))
         or f.endswith(("_test.go", "_test.py", ".test.ts", ".test.js", ".spec.ts", ".spec.js"))
     ]
-    signals["existing_test_files"] = test_files[:30]   # cap at 30
+    signals["existing_test_files"] = sorted(test_files)[:30]   # cap at 30
 
     # Existing CI/CD workflows
     workflow_files = [f for f in all_files if ".github/workflows" in f]
-    signals["existing_workflows"] = workflow_files
+    signals["existing_workflows"] = sorted(workflow_files)
 
     # README (more lines = richer context for GPT)
     readme                    = get_file("README.md") or get_file("readme.md") or ""
@@ -594,48 +660,55 @@ Return ONLY the corrected JSON manifest."""
 # ── 9. three-pass GPT detection ───────────────────────────────────────────────
 
 def detect_with_gpt(signals, hints, conflicts):
-    # Pass 1 — free-form deep analysis
-    print("[gpt] Pass 1 — deep reasoning ...")
-    p1 = client.chat.completions.create(
-        model="gpt-4o",
-        temperature=0,
-        messages=[
-            {"role": "system", "content": PASS1_SYSTEM},
-            {"role": "user",   "content": build_pass1_prompt(signals, hints, conflicts)},
-        ],
-    )
-    pass1_analysis = p1.choices[0].message.content
-    print(f"[gpt] Pass 1 complete ✓ ({len(pass1_analysis)} chars)")
+    for attempt in range(1, OPENAI_MAX_RETRIES + 1):
+        try:
+            # Pass 1 — free-form deep analysis
+            print("[gpt] Pass 1 — deep reasoning ...")
+            p1 = client.chat.completions.create(
+                model="gpt-4o",
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": PASS1_SYSTEM},
+                    {"role": "user",   "content": build_pass1_prompt(signals, hints, conflicts)},
+                ],
+            )
+            pass1_analysis = p1.choices[0].message.content
+            print(f"[gpt] Pass 1 complete ✓ ({len(pass1_analysis)} chars)")
 
-    # Pass 2 — structured mapping
-    print("[gpt] Pass 2 — structured mapping ...")
-    p2 = client.chat.completions.create(
-        model="gpt-4o",
-        response_format={"type": "json_object"},
-        temperature=0,
-        messages=[
-            {"role": "system", "content": PASS2_SYSTEM},
-            {"role": "user",   "content": build_pass2_prompt(signals, hints, pass1_analysis)},
-        ],
-    )
-    manifest = json.loads(p2.choices[0].message.content)
-    print("[gpt] Pass 2 complete ✓")
+            # Pass 2 — structured mapping
+            print("[gpt] Pass 2 — structured mapping ...")
+            p2 = client.chat.completions.create(
+                model="gpt-4o",
+                response_format={"type": "json_object"},
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": PASS2_SYSTEM},
+                    {"role": "user",   "content": build_pass2_prompt(signals, hints, pass1_analysis)},
+                ],
+            )
+            manifest = json.loads(p2.choices[0].message.content)
+            print("[gpt] Pass 2 complete ✓")
 
-    # Pass 3 — self-validation and correction
-    print("[gpt] Pass 3 — self-validation ...")
-    p3 = client.chat.completions.create(
-        model="gpt-4o",
-        response_format={"type": "json_object"},
-        temperature=0,
-        messages=[
-            {"role": "system", "content": PASS3_SYSTEM},
-            {"role": "user",   "content": build_pass3_prompt(manifest, signals, hints)},
-        ],
-    )
-    corrected_manifest = json.loads(p3.choices[0].message.content)
-    print("[gpt] Pass 3 complete ✓")
+            # Pass 3 — self-validation and correction
+            print("[gpt] Pass 3 — self-validation ...")
+            p3 = client.chat.completions.create(
+                model="gpt-4o",
+                response_format={"type": "json_object"},
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": PASS3_SYSTEM},
+                    {"role": "user",   "content": build_pass3_prompt(manifest, signals, hints)},
+                ],
+            )
+            corrected_manifest = json.loads(p3.choices[0].message.content)
+            print("[gpt] Pass 3 complete ✓")
+            return corrected_manifest, pass1_analysis
+        except Exception as e:
+            print(f"[WARN] OpenAI detection attempt {attempt}/{OPENAI_MAX_RETRIES} failed: {e}")
+            if attempt < OPENAI_MAX_RETRIES:
+                time.sleep(OPENAI_RETRY_SLEEP * attempt)
 
-    return corrected_manifest, pass1_analysis
+    raise RuntimeError("LLM detection failed after retries. Manifest generation aborted.")
 
 
 # ── 10. validate + enrich (Python — zero detection logic) ────────────────────

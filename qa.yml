@@ -1,0 +1,11 @@
+name: QA
+on: [push, pull_request]
+
+jobs:
+  detect:
+    uses: ./.github/workflows/detect-stack.yml
+    with:
+      target_repo: ${{ github.repository }}
+      upload_debug_artifact: false
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
